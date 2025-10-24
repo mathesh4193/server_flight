@@ -5,10 +5,11 @@ const connectDB = require('./src/config/db');
 const authRoutes = require('./src/routes/authRoutes');
 const flightRoutes = require('./src/routes/flightRoutes');
 const bookingRoutes = require('./src/routes/bookingRoutes');
-
+const paymentsRoutes = require('./src/routes/paymentsRoutes');
+const webhooksRoutes = require('./src/routes/webhooks');
 const app = express();
 
-// ✅ Middleware
+//  Middleware
 app.use(express.json());
 app.use(
   cors({
@@ -17,30 +18,33 @@ app.use(
   })
 );
 
-// ✅ Root route — shows API running message
+//  Root route — shows API running message
 app.get('/', (req, res) => {
   res.send(' API is running successfully on Flight Booking Server!');
 });
 
-// ✅ Other routes
+//  Other routes
 app.use('/api/auth', authRoutes);
 app.use('/api/flights', flightRoutes);
 app.use('/api/bookings', bookingRoutes);
-// ✅ Health check route
+//  Health check route
+app.use('/api/payments', paymentsRoutes);
+app.use('/api/webhooks', webhooksRoutes);
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-// ✅ 404 handler
+//  404 handler
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
 
-// ✅ Global error handler
+//  Global error handler
 app.use((err, req, res, next) => {
   console.error(' Server Error:', err.stack);
   res.status(500).json({ error: 'Something went wrong!' });
 });
 
-// ✅ DB + Server startup
+//  DB + Server startup
 const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/flightbook';
 

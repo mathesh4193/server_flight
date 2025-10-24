@@ -1,7 +1,14 @@
 const Flight = require('../models/Flight');
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
 
-// Get all flights
+//  Generate JWT token
+const generateToken = (id) => {
+  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
+};
+
+//  List all flights
 exports.listFlights = async (req, res) => {
   try {
     const flights = await Flight.find();
@@ -12,7 +19,7 @@ exports.listFlights = async (req, res) => {
   }
 };
 
-// Get flight by ID
+//  Get flight by ID
 exports.getFlight = async (req, res) => {
   try {
     const { id } = req.params;
@@ -29,7 +36,7 @@ exports.getFlight = async (req, res) => {
   }
 };
 
-// Create flight
+//  Create new flight
 exports.createFlight = async (req, res) => {
   try {
     const flight = await Flight.create(req.body);
@@ -40,6 +47,7 @@ exports.createFlight = async (req, res) => {
   }
 };
 
+//  Search flights
 exports.searchFlights = async (req, res) => {
   const { origin, destination, departureDate } = req.query;
 
@@ -48,7 +56,6 @@ exports.searchFlights = async (req, res) => {
   }
 
   try {
-    // Convert date to start and end of day
     const startDate = new Date(departureDate);
     startDate.setHours(0, 0, 0, 0);
 
@@ -65,5 +72,41 @@ exports.searchFlights = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+//  Search flight by flight number
+exports.getFlightByNumber = async (req, res) => {
+  try {
+    const { flightNumber } = req.params;
+    
+    const flight = await Flight.findOne({ flightNumber });
+    if (!flight) return res.status(404).json({ success: false, message: 'Flight not found' });
+
+    res.json({ success: true, flight });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+//  Login user controller
+exports.loginUser = async (req, res) => {
+  const { email, password } = req.body;
+
+  const user = await User.findOne({ email });
+
+  if (user && (await user.matchPassword(password))) {
+    res.json({
+      success: true,
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+      },
+      token: generateToken(user._id),
+    });
+  } else {
+    res.status(401).json({ success: false, message: 'Invalid email or password' });
   }
 };
