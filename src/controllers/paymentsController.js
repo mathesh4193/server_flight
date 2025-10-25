@@ -8,43 +8,52 @@ console.log('Environment check - STRIPE_SECRET_KEY length:', process.env.STRIPE_
 
 let stripe;
 try {
-  stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-  console.log('Stripe initialized successfully');
+  stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+  if (stripe) console.log('Stripe initialized successfully');
+  else console.warn('Stripe key missing; Stripe disabled');
 } catch (error) {
   console.error('Stripe initialization failed:', error);
   stripe = null;
 }
 const { enqueueNotification } = require('../services/notificationService');
 
-// PayPal SDK
-const paypal = require('@paypal/paypal-server-sdk');
-const { Client, Environment } = paypal;
-let paypalClient;
-
-if (process.env.NODE_ENV === 'production') {
-  paypalClient = new Client({
-    environment: Environment.Production,
-    clientCredentialsAuthCredentials: {
-      oAuthClientId: process.env.PAYPAL_CLIENT_ID,
-      oAuthClientSecret: process.env.PAYPAL_CLIENT_SECRET
-    }
-  });
-} else {
-  paypalClient = new Client({
-    environment: Environment.Sandbox,
-    clientCredentialsAuthCredentials: {
-      oAuthClientId: process.env.PAYPAL_CLIENT_ID,
-      oAuthClientSecret: process.env.PAYPAL_CLIENT_SECRET
-    }
-  });
+// PayPal SDK (optional)
+let paypalClient = null;
+try {
+  const paypal = require('@paypal/paypal-server-sdk');
+  const { Client, Environment } = paypal;
+  if (process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET) {
+    paypalClient = new Client({
+      environment: process.env.NODE_ENV === 'production' ? Environment.Production : Environment.Sandbox,
+      clientCredentialsAuthCredentials: {
+        oAuthClientId: process.env.PAYPAL_CLIENT_ID,
+        oAuthClientSecret: process.env.PAYPAL_CLIENT_SECRET
+      }
+    });
+    console.log('PayPal client initialized');
+  } else {
+    console.warn('PayPal credentials missing; PayPal disabled');
+  }
+} catch (err) {
+  console.warn('PayPal SDK not installed; PayPal disabled:', err.message);
 }
 
-// Razorpay
-const Razorpay = require('razorpay');
-const razorpay = process.env.RAZORPAY_KEY_ID ? new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET
-}) : null;
+// Razorpay (optional)
+let razorpay = null;
+try {
+  const Razorpay = require('razorpay');
+  if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
+    razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET
+    });
+    console.log('Razorpay initialized');
+  } else {
+    console.warn('Razorpay env keys missing; Razorpay disabled');
+  }
+} catch (err) {
+  console.warn('Razorpay SDK not installed; Razorpay disabled:', err.message);
+}
 
 exports.createIntent = async (req, res) => {
   try {
@@ -59,6 +68,14 @@ exports.createIntent = async (req, res) => {
     const validPaymentMethods = ['credit_card', 'debit_card', 'upi', 'net_banking', 'wallet', 'bank_transfer'];
     if (!validPaymentMethods.includes(paymentMethod)) {
       return res.status(400).json({ message: `Invalid payment method. Valid methods: ${validPaymentMethods.join(', ')}` });
+    }
+    
+    // Early gateway configuration checks
+    if (paymentGateway === 'stripe' && !stripe) {
+      return res.status(503).json({ message: 'Stripe is not configured' });
+    }
+    if (paymentGateway === 'paypal' && !paypalClient) {
+      return res.status(503).json({ message: 'PayPal is not configured' });
     }
     
     console.log('Stripe key status:', process.env.STRIPE_SECRET_KEY ? 'Present' : 'Missing');

@@ -29,6 +29,23 @@ exports.getFlight = async (req, res) => {
   }
 };
 
+// Get flight by number
+exports.getFlightByNumber = async (req, res) => {
+  try {
+    const { flightNumber } = req.params;
+    const flight = await Flight.findOne({ flightNumber });
+
+    if (!flight) {
+      return res.status(404).json({ success: false, message: 'Flight not found' });
+    }
+
+    res.json({ success: true, flight });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 // Create flight
 exports.createFlight = async (req, res) => {
   try {
