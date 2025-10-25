@@ -2,22 +2,20 @@
 const Stripe = require('stripe');
 const Payment = require('../models/Payment');
 const Booking = require('../models/Booking');
-
-console.log('Environment check - STRIPE_SECRET_KEY:', process.env.STRIPE_SECRET_KEY);
-console.log('Environment check - STRIPE_SECRET_KEY length:', process.env.STRIPE_SECRET_KEY?.length);
-
-let stripe;
-try {
-  stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
-  if (stripe) console.log('Stripe initialized successfully');
-  else console.warn('Stripe key missing; Stripe disabled');
-} catch (error) {
-  console.error('Stripe initialization failed:', error);
-  stripe = null;
-}
 const { enqueueNotification } = require('../services/notificationService');
 
-// PayPal SDK (optional)
+// Initialize Stripe
+let stripe;
+try {
+  if (!process.env.STRIPE_SECRET_KEY) throw new Error('Missing STRIPE_SECRET_KEY');
+  stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  console.log('Stripe initialized');
+} catch (err) {
+  console.error('Stripe init failed:', err.message);
+  stripe = null;
+}
+
+// PayPal (optional)
 let paypalClient = null;
 try {
   const paypal = require('@paypal/paypal-server-sdk');
@@ -27,15 +25,13 @@ try {
       environment: process.env.NODE_ENV === 'production' ? Environment.Production : Environment.Sandbox,
       clientCredentialsAuthCredentials: {
         oAuthClientId: process.env.PAYPAL_CLIENT_ID,
-        oAuthClientSecret: process.env.PAYPAL_CLIENT_SECRET
-      }
+        oAuthClientSecret: process.env.PAYPAL_CLIENT_SECRET,
+      },
     });
-    console.log('PayPal client initialized');
-  } else {
-    console.warn('PayPal credentials missing; PayPal disabled');
+    console.log('PayPal initialized');
   }
-} catch (err) {
-  console.warn('PayPal SDK not installed; PayPal disabled:', err.message);
+} catch (_) {
+  console.warn('PayPal not configured');
 }
 
 // Razorpay (optional)
@@ -45,127 +41,66 @@ try {
   if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
     razorpay = new Razorpay({
       key_id: process.env.RAZORPAY_KEY_ID,
-      key_secret: process.env.RAZORPAY_KEY_SECRET
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
     });
     console.log('Razorpay initialized');
-  } else {
-    console.warn('Razorpay env keys missing; Razorpay disabled');
   }
-} catch (err) {
-  console.warn('Razorpay SDK not installed; Razorpay disabled:', err.message);
+} catch (_) {
+  console.warn('Razorpay not configured');
 }
 
 exports.createIntent = async (req, res) => {
   try {
     const { bookingId, paymentGateway = 'stripe', paymentMethod } = req.body;
-    
-    // Validate payment method
-    if (!paymentMethod) {
-      return res.status(400).json({ message: 'Payment method is required' });
-    }
-    
-    // Map payment method to valid values
-    const validPaymentMethods = ['credit_card', 'debit_card', 'upi', 'net_banking', 'wallet', 'bank_transfer'];
-    if (!validPaymentMethods.includes(paymentMethod)) {
-      return res.status(400).json({ message: `Invalid payment method. Valid methods: ${validPaymentMethods.join(', ')}` });
-    }
-    
-    // Early gateway configuration checks
-    if (paymentGateway === 'stripe' && !stripe) {
-      return res.status(503).json({ message: 'Stripe is not configured' });
-    }
-    if (paymentGateway === 'paypal' && !paypalClient) {
-      return res.status(503).json({ message: 'PayPal is not configured' });
-    }
-    
-    console.log('Stripe key status:', process.env.STRIPE_SECRET_KEY ? 'Present' : 'Missing');
-    console.log('Stripe key length:', process.env.STRIPE_SECRET_KEY?.length);
-    console.log('Stripe key prefix:', process.env.STRIPE_SECRET_KEY?.substring(0, 15));
-    
-    // Validate booking ID format
-    if (!bookingId) {
-      return res.status(400).json({ message: 'Booking ID is required' });
-    }
-    
-    console.log('Looking for booking with ID:', bookingId);
-    console.log('Booking ID type:', typeof bookingId);
-    
-    const booking = await Booking.findById(bookingId).populate('user flight');
-    console.log('Booking found:', booking ? 'Yes' : 'No');
-    if (!booking) {
-      console.log('Booking not found for ID:', bookingId);
-      return res.status(404).json({ message: 'Booking not found' });
+
+    if (!bookingId) return res.status(400).json({ message: 'Booking ID required' });
+    if (!paymentMethod) return res.status(400).json({ message: 'Payment method required' });
+
+    const validMethods = ['credit_card', 'debit_card', 'upi', 'net_banking', 'wallet', 'bank_transfer'];
+    if (!validMethods.includes(paymentMethod)) {
+      return res.status(400).json({ message: 'Invalid payment method' });
     }
 
-    const amount = Math.round(booking.totalPrice * 100); // cents/paise
+    const booking = await Booking.findById(bookingId).populate('user flight');
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+    const amount = Math.round(booking.totalPrice * 100); // in paise/cents
     let paymentData = {};
-    
-    // Process based on payment gateway
+
     switch (paymentGateway) {
       case 'stripe':
+        if (!stripe) return res.status(503).json({ message: 'Stripe not configured' });
         const paymentIntent = await stripe.paymentIntents.create({
           amount,
           currency: 'inr',
-          metadata: { 
-            bookingId: booking._id.toString(), 
-            userId: booking.user?._id?.toString() 
-          },
-          automatic_payment_methods: { enabled: true }
+          ...(paymentMethod === 'upi' ? { payment_method_types: ['upi'] } : { automatic_payment_methods: { enabled: true } }),
+          metadata: { bookingId: booking._id.toString(), userId: booking.user?._id?.toString() }
         });
-        
-        paymentData = {
-          paymentIntentId: paymentIntent.id,
-          clientSecret: paymentIntent.client_secret,
-          raw: paymentIntent
-        };
+        paymentData = { paymentIntentId: paymentIntent.id, clientSecret: paymentIntent.client_secret, raw: paymentIntent };
         break;
-        
+
       case 'paypal':
-        // Create PayPal order using the new SDK structure
-        const response = await paypalClient.Orders.create({
+        if (!paypalClient) return res.status(503).json({ message: 'PayPal not configured' });
+        const order = await paypalClient.Orders.create({
           intent: 'CAPTURE',
-          purchase_units: [{
-            amount: {
-              currency_code: 'INR',
-              value: booking.totalPrice.toString()
-            },
-            reference_id: booking._id.toString()
-          }]
+          purchase_units: [{ amount: { currency_code: 'INR', value: booking.totalPrice.toString() }, reference_id: booking._id.toString() }],
         });
-        
-        paymentData = {
-          paymentIntentId: response.id,
-          clientSecret: null,
-          raw: response
-        };
+        paymentData = { paymentIntentId: order.id, clientSecret: null, raw: order };
         break;
-        
+
       case 'razorpay':
-        if (!razorpay) {
-          return res.status(400).json({ message: 'Razorpay is not configured' });
-        }
-        
-        const razorpayOrder = await razorpay.orders.create({
-          amount: amount,
+        if (!razorpay) return res.status(503).json({ message: 'Razorpay not configured' });
+        const orderRazor = await razorpay.orders.create({
+          amount,
           currency: 'INR',
           receipt: `booking_${booking._id}`,
-          notes: {
-            bookingId: booking._id.toString(),
-            userId: booking.user?._id?.toString()
-          }
+          notes: { bookingId: booking._id.toString(), userId: booking.user?._id?.toString() },
         });
-        
-        paymentData = {
-          paymentIntentId: razorpayOrder.id,
-          clientSecret: null,
-          raw: razorpayOrder
-        };
+        paymentData = { paymentIntentId: orderRazor.id, clientSecret: null, raw: orderRazor };
         break;
-        
+
       case 'bank_transfer':
-        // Generate a unique reference number for bank transfer
         const referenceId = `BT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        
         paymentData = {
           paymentIntentId: referenceId,
           clientSecret: null,
@@ -174,17 +109,17 @@ exports.createIntent = async (req, res) => {
             accountDetails: {
               bankName: process.env.BANK_NAME || 'Example Bank',
               accountNumber: process.env.BANK_ACCOUNT_NUMBER || '1234567890',
-              ifscCode: process.env.BANK_IFSC_CODE || 'EXBK0001234'
-            }
-          }
+              ifscCode: process.env.BANK_IFSC_CODE || 'EXBK0001234',
+            },
+          },
         };
         break;
-        
+
       default:
-        return res.status(400).json({ message: 'Unsupported payment gateway' });
+        return res.status(400).json({ message: 'Unsupported gateway' });
     }
 
-    // Save payment record
+    // Save payment
     const payment = await Payment.create({
       booking: booking._id,
       user: booking.user?._id,
@@ -194,140 +129,158 @@ exports.createIntent = async (req, res) => {
       amount: booking.totalPrice,
       currency: 'INR',
       status: 'created',
-      metadata: {
-        paymentGateway,
-        paymentMethod
-      },
+      metadata: { paymentGateway, paymentMethod },
       raw: paymentData.raw,
     });
 
-    res.json({ 
+    res.json({
       paymentId: payment._id,
       paymentGateway,
       clientSecret: paymentData.clientSecret,
       paymentIntentId: paymentData.paymentIntentId,
-      ...('bank_transfer' === paymentGateway ? { bankDetails: paymentData.raw.accountDetails } : {})
+      ...(paymentGateway === 'bank_transfer' ? { bankDetails: paymentData.raw.accountDetails } : {}),
     });
   } catch (err) {
-    console.error('createIntent err:', err);
-    console.error('Error name:', err.name);
-    console.error('Error message:', err.message);
-    console.error('Error stack:', err.stack);
-    if (err.type) console.error('Error type:', err.type);
-    if (err.code) console.error('Error code:', err.code);
-    if (err.raw) console.error('Error raw:', err.raw);
+    console.error('createIntent err', err);
     res.status(500).json({ message: 'Failed to create payment intent', error: err.message });
-  }
-};
-
-exports.refund = async (req, res) => {
-  try {
-    const { paymentIntentId, bookingId, reason } = req.body;
-    
-    // Find payment record
-    const payment = await Payment.findOne({ paymentIntentId });
-    if (!payment) return res.status(404).json({ message: 'Payment record not found' });
-    
-    // Process refund through Stripe
-    const refund = await stripe.refunds.create({
-      payment_intent: paymentIntentId,
-      reason: reason || 'requested_by_customer'
-    });
-    
-    // Update payment status
-    payment.status = 'refunded';
-    payment.refundId = refund.id;
-    payment.refundReason = reason;
-    payment.refundedAt = new Date();
-    await payment.save();
-    
-    // Update booking status
-    const booking = await Booking.findById(bookingId);
-    if (booking) {
-      booking.status = 'cancelled';
-      booking.paymentStatus = 'refunded';
-      await booking.save();
-      
-      // Send notification
-      await enqueueNotification({
-        userId: booking.user,
-        bookingId: booking._id,
-        type: 'booking_refund',
-        channels: ['email', 'sms'],
-        subject: `Booking refunded — ${booking._id}`,
-        body: `Your booking for flight ${booking.flight} has been cancelled and refunded. Refund ID: ${refund.id}`,
-        to: booking.contactInfo?.email,
-      });
-    }
-    
-    res.json({ success: true, refundId: refund.id });
-  } catch (err) {
-    console.error('refund payment err', err);
-    res.status(500).json({ message: 'Failed to process refund' });
-  }
-};
-
-exports.getPaymentByBooking = async (req, res) => {
-  try {
-    const { bookingId } = req.params;
-    
-    const payment = await Payment.findOne({ booking: bookingId });
-    if (!payment) return res.status(404).json({ message: 'Payment not found for this booking' });
-    
-    res.json({
-      id: payment._id,
-      amount: payment.amount,
-      currency: payment.currency,
-      status: payment.status,
-      createdAt: payment.createdAt,
-      paymentGateway: payment.paymentGateway,
-      paymentIntentId: payment.paymentIntentId,
-      refundId: payment.refundId,
-      refundedAt: payment.refundedAt
-    });
-  } catch (err) {
-    console.error('get payment err', err);
-    res.status(500).json({ message: 'Failed to retrieve payment information' });
   }
 };
 
 exports.confirm = async (req, res) => {
   try {
     const { paymentIntentId, bookingId } = req.body;
-    // Verify with Stripe
-    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (!paymentIntentId || !bookingId) return res.status(400).json({ message: 'Missing paymentIntentId or bookingId' });
 
     const payment = await Payment.findOne({ paymentIntentId });
     if (!payment) return res.status(404).json({ message: 'Payment record not found' });
 
-    // Update Payment status
-    payment.status = intent.status === 'succeeded' ? 'succeeded' : intent.status;
-    payment.raw = intent;
-    await payment.save();
+    // For Stripe, retrieve intent
+    if (payment.paymentGateway === 'stripe') {
+      const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+      payment.status = intent.status === 'succeeded' ? 'succeeded' : intent.status;
+      payment.raw = intent;
+      await payment.save();
 
-    if (intent.status === 'succeeded') {
-      // Update booking payment status
+      if (intent.status === 'succeeded') {
+        const booking = await Booking.findById(bookingId);
+        booking.paymentStatus = 'paid';
+        booking.paymentIntentId = paymentIntentId;
+        booking.status = 'confirmed';
+        await booking.save();
+
+        await enqueueNotification({
+          userId: booking.user,
+          bookingId: booking._id,
+          type: 'booking_confirm',
+          channels: ['email', 'sms'],
+          subject: `Booking confirmed — ${booking._id}`,
+          body: `Your booking for flight ${booking.flight} is confirmed. Booking ref: ${booking._id}.`,
+          to: booking.contactInfo?.email,
+        });
+      }
+    }
+
+    // For UPI / other methods, mark as succeeded after manual confirmation
+    else if (['upi', 'bank_transfer', 'razorpay', 'paypal'].includes(payment.paymentMethod)) {
+      payment.status = 'succeeded';
+      await payment.save();
+
       const booking = await Booking.findById(bookingId);
       booking.paymentStatus = 'paid';
-      booking.paymentIntentId = paymentIntentId;
       booking.status = 'confirmed';
       await booking.save();
-
-      // enqueue notification to user
-      await enqueueNotification({
-        userId: booking.user,
-        bookingId: booking._id,
-        type: 'booking_confirm',
-        channels: ['email', 'sms'],
-        subject: `Booking confirmed — ${booking._id}`,
-        body: `Your booking for flight ${booking.flight} is confirmed. Booking ref: ${booking._id}.`,
-        to: booking.contactInfo?.email,
-      });
     }
 
     res.json({ success: true, paymentStatus: payment.status });
   } catch (err) {
     console.error('confirm payment err', err);
-    res.status(500).json({ message: 'Failed to confirm payment' });
+    res.status(500).json({ message: 'Failed to confirm payment', error: err.message });
+  }
+};
+
+exports.refund = async (req, res) => {
+  try {
+    const { bookingId, paymentIntentId, amount, reason } = req.body;
+    if (!bookingId && !paymentIntentId) {
+      return res.status(400).json({ message: 'Provide bookingId or paymentIntentId' });
+    }
+
+    let payment;
+    if (paymentIntentId) {
+      payment = await Payment.findOne({ paymentIntentId });
+    } else {
+      payment = await Payment.findOne({ booking: bookingId }).sort({ createdAt: -1 });
+    }
+    if (!payment) return res.status(404).json({ message: 'Payment record not found' });
+
+    const refundAmountInCents = typeof amount === 'number' ? Math.round(amount * 100) : undefined;
+
+    if (payment.paymentGateway === 'stripe' && stripe) {
+      const refund = await stripe.refunds.create({
+        payment_intent: payment.paymentIntentId,
+        amount: refundAmountInCents,
+      });
+
+      payment.status = refundAmountInCents && refundAmountInCents < Math.round((payment.amount || 0) * 100)
+        ? 'partially_refunded'
+        : 'refunded';
+      payment.refundId = refund.id;
+      payment.refundAmount = typeof amount === 'number' ? amount : payment.amount;
+      payment.refundReason = reason || 'Customer requested refund';
+      payment.refundedAt = new Date();
+      payment.raw = { ...(payment.raw || {}), refund };
+      await payment.save();
+    } else {
+      payment.status = typeof amount === 'number' && amount < (payment.amount || 0)
+        ? 'partially_refunded'
+        : 'refunded';
+      payment.refundAmount = typeof amount === 'number' ? amount : payment.amount;
+      payment.refundReason = reason || 'Customer requested refund';
+      payment.refundedAt = new Date();
+      await payment.save();
+    }
+
+    const booking = await Booking.findById(payment.booking);
+    if (booking) {
+      booking.paymentStatus = 'refunded';
+      await booking.save();
+    }
+
+    await enqueueNotification({
+      userId: payment.user,
+      bookingId: payment.booking,
+      type: 'payment_refund',
+      channels: ['email'],
+      subject: `Refund processed — ${bookingId || paymentIntentId}`,
+      body: `Your refund has been processed for booking ${payment.booking}. Amount: ₹${payment.refundAmount}.`,
+      to: booking?.contactInfo?.email,
+    });
+
+    return res.json({
+      success: true,
+      status: payment.status,
+      refundId: payment.refundId || null,
+      refundAmount: payment.refundAmount,
+    });
+  } catch (err) {
+    console.error('refund err', err);
+    return res.status(500).json({ message: 'Failed to process refund', error: err.message });
+  }
+};
+
+exports.getPaymentByBooking = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    if (!bookingId) return res.status(400).json({ message: 'bookingId is required' });
+
+    const payments = await Payment.find({ booking: bookingId }).sort({ createdAt: -1 });
+    if (!payments || payments.length === 0) {
+      return res.status(404).json({ message: 'No payments found for booking' });
+    }
+
+    return res.json({ payment: payments[0], payments });
+  } catch (err) {
+    console.error('getPaymentByBooking err', err);
+    return res.status(500).json({ message: 'Failed to fetch payment', error: err.message });
   }
 };

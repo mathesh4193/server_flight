@@ -1,6 +1,19 @@
+// src/routes/paymentsRoutes.js
 const express = require('express');
 const router = express.Router();
 const paymentsController = require('../controllers/paymentsController');
+
+// Middleware to log requests
+const logRequest = (req, res, next) => {
+  console.log('Payment request received:', {
+    method: req.method,
+    url: req.originalUrl,
+    body: req.body,
+    headers: req.headers,
+    timestamp: new Date().toISOString()
+  });
+  next();
+};
 
 // Test route to verify server is responding
 router.get('/test', (req, res) => {
@@ -8,20 +21,16 @@ router.get('/test', (req, res) => {
   res.json({ message: 'Payments API is working' });
 });
 
-// Create payment intent (Stripe / payment gateway)
-router.post('/create-intent', (req, res, next) => {
-  console.log('Payment intent request received:', {
-    body: req.body,
-    headers: req.headers,
-    timestamp: new Date().toISOString()
-  });
-  next();
-}, paymentsController.createIntent);
+// Create payment intent (Stripe / UPI / Bank Transfer)
+router.post('/create-intent', logRequest, paymentsController.createIntent);
 
-router.post('/confirm', paymentsController.confirm);
+// Confirm payment (Stripe / UPI)
+router.post('/confirm', logRequest, paymentsController.confirm);
 
-router.post('/refund', paymentsController.refund);
+// Refund payment
+router.post('/refund', logRequest, paymentsController.refund);
 
-router.get('/:bookingId', paymentsController.getPaymentByBooking);
+// Get payment info by booking
+router.get('/:bookingId', logRequest, paymentsController.getPaymentByBooking);
 
 module.exports = router;

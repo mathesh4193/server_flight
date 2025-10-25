@@ -4,11 +4,11 @@ const Flight = require('../models/Flight');
 const User = require('../models/User');
 const PDFDocument = require('pdfkit');
 
-//  Create a new booking
+// Create a new booking
 exports.createBooking = async (req, res) => {
   try {
-    const { flightId: flightIdFromBody, flightNumber, passengers, cabinClass, contactInfo } = req.body;
-    const userId = req.user?._id; // optional for guest users
+    const { flightId, flightNumber, passengers, cabinClass, contactInfo } = req.body;
+    const userId = req.user?._id;
 
     if (!passengers || !Array.isArray(passengers) || passengers.length === 0) {
       return res.status(400).json({ message: 'Passengers information is required' });
@@ -16,12 +16,10 @@ exports.createBooking = async (req, res) => {
 
     let flight;
 
-    // 🔹 Check flight by number
+    // Find flight by number
     if (flightNumber) {
       flight = await Flight.findOne({ flightNumber });
-
       if (!flight) {
-        // Create a new flight if full details are provided
         const { origin, destination, departureDate, arrivalDate, price, airline } = req.body;
         if (origin && destination && departureDate && price) {
           flight = await Flight.create({
@@ -35,30 +33,28 @@ exports.createBooking = async (req, res) => {
               : new Date(new Date(departureDate).getTime() + 60 * 60 * 1000),
             price,
             seatsAvailable: 100,
-            cabinClass: 'economy',
+            cabinClass: cabinClass || 'economy',
           });
         } else {
           return res.status(404).json({ message: 'Flight not found and insufficient data to create one' });
         }
       }
     }
-    // 🔹 Check flight by ID
-    else if (flightIdFromBody) {
-      if (!mongoose.Types.ObjectId.isValid(flightIdFromBody)) {
-        return res.status(400).json({ message: 'Invalid flight ID' });
-      }
-      flight = await Flight.findById(flightIdFromBody);
+    // Find flight by ID
+    else if (flightId) {
+      if (!mongoose.Types.ObjectId.isValid(flightId)) return res.status(400).json({ message: 'Invalid flight ID' });
+      flight = await Flight.findById(flightId);
       if (!flight) return res.status(404).json({ message: 'Flight not found' });
     } else {
       return res.status(400).json({ message: 'Either flightId or flightNumber must be provided' });
     }
 
-    // 💰 Calculate total price
-    const priceMultiplier = cabinClass === 'business' ? 1.5 : cabinClass === 'first' ? 2 : 1;
-    const totalPrice = flight.price * passengers.length * priceMultiplier;
+    // Calculate total price
+    const multiplier = cabinClass === 'business' ? 1.5 : cabinClass === 'first' ? 2 : 1;
+    const totalPrice = flight.price * passengers.length * multiplier;
 
-    // 📞 Auto-fill contact info
-    let finalContactInfo = { ...contactInfo };
+    // Fill contact info from user
+    const finalContactInfo = { ...contactInfo };
     if (userId) {
       const user = await User.findById(userId);
       if (user) {
@@ -67,7 +63,7 @@ exports.createBooking = async (req, res) => {
       }
     }
 
-    // 🧾 Prepare booking data
+    // Create booking
     const bookingData = {
       flight: flight._id,
       passengers,
@@ -78,7 +74,6 @@ exports.createBooking = async (req, res) => {
     if (userId) bookingData.user = userId;
 
     const booking = await Booking.create(bookingData);
-
     res.status(201).json({ success: true, booking });
   } catch (err) {
     console.error(err);
@@ -86,7 +81,7 @@ exports.createBooking = async (req, res) => {
   }
 };
 
-//  Get all bookings of logged-in user
+// Get bookings for logged-in user
 exports.getUserBookings = async (req, res) => {
   try {
     const bookings = await Booking.find({ user: req.user._id }).populate('flight');
@@ -97,15 +92,15 @@ exports.getUserBookings = async (req, res) => {
   }
 };
 
-//  Get a single booking by ID
+// Get booking by ID
 exports.getBookingById = async (req, res) => {
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: 'Invalid booking ID' });
-    }
-    const booking = await Booking.findById(id).populate('flight');
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid booking ID' });
+
+    const booking = await Booking.findById(id).populate('flight user');
     if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
     res.json({ success: true, booking });
   } catch (err) {
     console.error(err);
@@ -113,103 +108,107 @@ exports.getBookingById = async (req, res) => {
   }
 };
 
-//  Check bookings by flight number + contact info
-exports.checkBookingByFlightDetails = async (req, res) => {
+// Get bookings by user email
+exports.getBookingsByUserEmail = async (req, res) => {
   try {
-    const { flightNumber, email, phone } = req.body;
-    const flight = await Flight.findOne({ flightNumber });
-    if (!flight) return res.status(404).json({ message: 'Flight not found with this flight number' });
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ message: 'User email is required' });
 
-    const bookings = await Booking.find({
-      flight: flight._id,
-      $or: [
-        { 'contactInfo.email': email },
-        { 'contactInfo.phone': phone }
-      ],
-    }).populate('flight');
-
-    if (bookings.length === 0) {
-      return res.status(404).json({ message: 'No bookings found for this flight with provided contact info' });
-    }
-
+    const bookings = await Booking.find({ 'contactInfo.email': email }).populate('flight user');
     res.json({ success: true, bookings });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    console.error('getBookingsByUserEmail error:', err);
+    res.status(500).json({ message: 'Failed to fetch bookings' });
   }
 };
 
-//  Generate and download ticket as PDF
-exports.generateTicket = async (req, res) => {
+// Download ticket PDF
+exports.downloadTicket = async (req, res) => {
   try {
-    const booking = await Booking.findById(req.params.id).populate('flight');
-    if (!booking) return res.status(404).json({ message: 'Booking not found' });
-
-    const doc = new PDFDocument();
-    const filename = `ticket-${booking._id}.pdf`;
-
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Type', 'application/pdf');
-
-    doc.pipe(res);
-
-    // 🛫 Ticket Header
-    doc.fontSize(22).text('✈️ Airline Ticket', { align: 'center' });
-    doc.moveDown(0.5);
-    doc.fontSize(14).text(`Booking ID: ${booking._id}`);
-    doc.text(`Status: ${booking.status ? booking.status.toUpperCase() : 'CONFIRMED'}`);
-    doc.moveDown();
-
-    // 🛩 Flight Details
-    doc.fontSize(16).text('Flight Details', { underline: true });
-    doc.fontSize(12)
-      .text(`Airline: ${booking.flight.airline}`)
-      .text(`Flight No: ${booking.flight.flightNumber}`)
-      .text(`From: ${booking.flight.origin}`)
-      .text(`To: ${booking.flight.destination}`)
-      .text(`Departure: ${new Date(booking.flight.departureDate).toLocaleString()}`)
-      .text(`Cabin Class: ${booking.cabinClass}`)
-      .moveDown();
-
-    // 👥 Passenger List
-    doc.fontSize(16).text('Passengers', { underline: true });
-    booking.passengers.forEach((p, i) => {
-      doc.fontSize(12).text(`${i + 1}. ${p.firstName} ${p.lastName} (${p.gender}) - DOB: ${p.dateOfBirth}`);
-    });
-    doc.moveDown();
-
-    // 💳 Payment Summary
-    doc.fontSize(14).text(`Total Amount: ₹${booking.totalPrice}`, { align: 'right' });
-    doc.moveDown(2);
-
-    // ✉️ Contact Info
-    doc.fontSize(12)
-      .text(`Contact Email: ${booking.contactInfo?.email || 'N/A'}`)
-      .text(`Contact Phone: ${booking.contactInfo?.phone || 'N/A'}`);
-
-    doc.end();
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Error generating ticket', error: err.message });
-  }
-};
-
-exports.cancelBooking = async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    const bookingId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
       return res.status(400).json({ message: 'Invalid booking ID' });
     }
 
-    const booking = await Booking.findById(id);
-    if (!booking) {
-      return res.status(404).json({ message: 'Booking not found' });
-    }
+    const booking = await Booking.findById(bookingId).populate('flight user');
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
 
-    // Only allow cancellation if booking is not already cancelled
-    if (booking.status === 'cancelled') {
-      return res.status(400).json({ message: 'Booking is already cancelled' });
-    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=booking_${booking._id}.pdf`);
+
+    const doc = new PDFDocument();
+    doc.pipe(res);
+
+    doc.fontSize(20).text('Flight Ticket', { align: 'center' }).moveDown();
+    doc.fontSize(14).text(`Booking ID: ${booking._id}`);
+    doc.text(`Passenger(s):`);
+    booking.passengers.forEach((p, i) => {
+      doc.text(`${i + 1}. ${p.firstName} ${p.lastName} — ${p.gender} — DOB: ${p.dateOfBirth}`);
+    });
+    doc.moveDown();
+    doc.text(`Flight: ${booking.flight.airline} (${booking.flight.flightNumber})`);
+    doc.text(`From: ${booking.flight.origin}`);
+    doc.text(`To: ${booking.flight.destination}`);
+    doc.text(`Departure: ${new Date(booking.flight.departureDate).toLocaleString()}`);
+    doc.moveDown();
+    doc.text(`Cabin Class: ${booking.cabinClass}`);
+    doc.text(`Total Price: ₹${booking.totalPrice}`);
+    doc.text(`Payment Status: ${booking.paymentStatus || 'UNPAID'}`);
+    doc.end();
+  } catch (err) {
+    console.error('Download ticket error:', err);
+    res.status(500).json({ message: 'Failed to generate ticket', error: err.message });
+  }
+};
+
+// Cancel booking
+exports.cancelBooking = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid booking ID' });
+
+    const booking = await Booking.findById(id);
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+    booking.status = 'cancelled';
+    await booking.save();
+
+    res.json({ success: true, booking });
+  } catch (err) {
+    console.error('cancelBooking err:', err);
+    res.status(500).json({ message: 'Failed to cancel booking', error: err.message });
+  }
+};
+
+// Check-in booking
+exports.checkInBooking = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid booking ID' });
+
+    const booking = await Booking.findById(id);
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+    booking.status = 'checked_in';
+    await booking.save();
+
+    res.json({ success: true, booking });
+  } catch (err) {
+    console.error('checkInBooking err:', err);
+    res.status(500).json({ message: 'Failed to check in booking', error: err.message });
+  }
+};
+
+// Cancel booking
+exports.cancelBooking = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid booking ID' });
+
+    const booking = await Booking.findById(id);
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+    if (booking.status === 'cancelled') return res.status(400).json({ message: 'Booking is already cancelled' });
 
     booking.status = 'cancelled';
     await booking.save();
@@ -221,26 +220,17 @@ exports.cancelBooking = async (req, res) => {
   }
 };
 
+// Check-in booking
 exports.checkInBooking = async (req, res) => {
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: 'Invalid booking ID' });
-    }
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid booking ID' });
 
     const booking = await Booking.findById(id);
-    if (!booking) {
-      return res.status(404).json({ message: 'Booking not found' });
-    }
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
 
-    // Only allow check-in if booking is confirmed and not already checked in
-    if (booking.status !== 'confirmed') {
-      return res.status(400).json({ message: 'Booking must be confirmed to check in' });
-    }
-
-    if (booking.checkedIn) {
-      return res.status(400).json({ message: 'Already checked in' });
-    }
+    if (booking.status !== 'confirmed') return res.status(400).json({ message: 'Booking must be confirmed to check in' });
+    if (booking.checkedIn) return res.status(400).json({ message: 'Already checked in' });
 
     booking.checkedIn = true;
     booking.checkedInAt = new Date();
@@ -250,5 +240,46 @@ exports.checkInBooking = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+exports.downloadTicket = async (req, res) => {
+  try {
+    const bookingId = req.params.id;
+    const booking = await Booking.findById(bookingId).populate('flight user');
+
+    if (!booking) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=booking_${booking._id}.pdf`);
+
+    const doc = new PDFDocument();
+    doc.pipe(res);
+
+    doc.fontSize(20).text('Flight Ticket', { align: 'center' });
+    doc.moveDown();
+
+    doc.fontSize(14).text(`Booking ID: ${booking._id}`);
+    doc.text(`Passenger(s):`);
+    booking.passengers.forEach((p, i) => {
+      doc.text(`${i + 1}. ${p.firstName} ${p.lastName} — ${p.gender} — DOB: ${p.dateOfBirth}`);
+    });
+    doc.moveDown();
+
+    doc.text(`Flight: ${booking.flight.airline} (${booking.flight.flightNumber})`);
+    doc.text(`From: ${booking.flight.origin}`);
+    doc.text(`To: ${booking.flight.destination}`);
+    doc.text(`Departure: ${new Date(booking.flight.departureDate).toLocaleString()}`);
+    doc.moveDown();
+
+    doc.text(`Cabin Class: ${booking.cabinClass}`);
+    doc.text(`Total Price: ₹${booking.totalPrice}`);
+    doc.text(`Payment Status: ${booking.paymentStatus}`);
+
+    doc.end();
+  } catch (err) {
+    console.error('Download ticket error:', err);
+    res.status(500).json({ message: 'Failed to generate ticket' });
   }
 };
