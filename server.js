@@ -13,7 +13,12 @@ const app = express();
 app.use(express.json());
 app.use(
   cors({
-    origin: 'http://localhost:3000', // frontend origin
+    origin: [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://localhost:3002',
+      'https://clientflight.netlify.app',
+    ],
     credentials: true,
   })
 );
@@ -21,6 +26,13 @@ app.use(
 //  Root route — shows API running message
 app.get('/', (req, res) => {
   res.send(' API is running successfully on Flight Booking Server!');
+});
+
+// Config route — return Stripe publishable key
+app.get('/api/config/stripe-publishable', (req, res) => {
+  const key = process.env.STRIPE_PUBLISHABLE_KEY || null;
+  if (!key) return res.status(503).json({ message: 'Stripe publishable key missing' });
+  res.json({ publishableKey: key });
 });
 
 //  Other routes
@@ -51,7 +63,7 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/flightbook
 connectDB(MONGO_URI)
   .then(() => {
     app.listen(PORT, () => {
-      console.log(` Server running on http://localhost:${PORT}`);
+      console.log(`Server running on http://localhost:${PORT}`);
     });
   })
   .catch((err) => {
